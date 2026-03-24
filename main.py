@@ -39,11 +39,18 @@ def main():
 
             role = message.get("role")
             content = message.get("content")
+            if not isinstance(content, list):
+                continue
+
             if role == "user":
-                logging.info("User: " + content)
+                for user_content in content:
+                    if user_content["type"] == "text":
+                        logging.info("User: " + user_content["text"])
 
             if role == "assistant":
-                logging.info("Assistant: " + content[0]['text'])
+                for agent_content in content:
+                    if agent_content["type"] == "text":
+                        logging.info("Assistant: " + agent_content["text"])
 
 
 if __name__ == "__main__":
