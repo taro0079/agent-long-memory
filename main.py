@@ -1,90 +1,39 @@
-import json
 import sys
-from pathlib import Path
-import logging
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import AzureOpenAIEmbeddings
-from langchain_chroma import Chroma
+import json
+from typing import TextIO
+from redis import Redis
+from rq import Queue
+from tasks import process
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-log_dir = Path(__file__).parent / "logs"
-log_dir.mkdir(exist_ok=True)
-log_file = log_dir / "log.log"
-
-logging.basicConfig(
-    filename=log_file,
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    encoding="utf-8",
-)
-
-file_path = "output.txt"
+redis_conn = Redis(host="localhost", port=6379)
+q = Queue(connection=redis_conn)
 
 
-def process_and_store_message(message: str, persist_directory: str = "./chroma_db"):
-    """
-    メッセージをチャンキングしてOpenAIでベクトル化して保存する
-    """
+def handle_user_request(user_message: TextIO):
+    data = user_message.read()
 
-    doc = Document(page_content=message, metadata={})
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300, chunk_overlap=50, separators=["\n\n", "\n", "。", "、", " ", ""]
-    )
-    chunks = text_splitter.split_documents([doc])
-    embeddings = AzureOpenAIEmbeddings(azure_deployment="text-embedding-3-large")
-
-    vectorstore = Chroma.from_documents(
-        documents=chunks, embedding=embeddings, persist_directory=persist_directory
-    )
-
-    return vectorstore
-
-
-def main():
+    # stdinのJSONからtranscript_pathを取得し、ファイル内容を読み込む
     try:
-        event_data = json.load(sys.stdin)
+        event_data = json.loads(data)
     except json.JSONDecodeError:
-        logging.warning("stdin is not valid JSON")
+        print("stdin is not valid JSON", file=sys.stderr)
         sys.exit(0)
 
     transcript_path = event_data.get("transcript_path")
     if not transcript_path:
-        logging.warning("transcript_path not found in event_data")
+        print("transcript_path not found in event_data", file=sys.stderr)
         sys.exit(0)
-    with open(transcript_path, "r", encoding="utf-8") as f:
-        with open(file_path, 'w', encoding='utf-8') as file:
-            for line in f:
-                file.write(line)
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                message = entry.get("message")
-                if not message:
-                    continue
 
-                role = message.get("role")
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
+    # ホスト上でトランスクリプトファイルを読み込み、内容をキューに渡す
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            transcript_content = f.read()
+    except FileNotFoundError:
+        print(f"Transcript file not found: {transcript_path}", file=sys.stderr)
+        sys.exit(0)
 
-                if role == "user":
-                    logging.info(content)
-                    for user_content in content:
-                        if user_content["type"] == "text":
-                            logging.info("User: " + user_content["text"])
+    q.enqueue(process, transcript_content)
 
-                if role == "assistant":
-                    for agent_content in content:
-                        if agent_content["type"] == "text":
-                            logging.info("Assistant: " + agent_content["text"])
-    with open(file_path, 'r', encoding='utf-8') as ff:
-        file_content = ff.read()
-        process_and_store_message(file_content);
 
 if __name__ == "__main__":
-    main()
+    handle_user_request(sys.stdin)
